@@ -3,11 +3,14 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from openai import AsyncOpenAI
 import json
+from dotenv import load_dotenv
 import os 
 from datetime import datetime, time
 import asyncio
 import hashlib
 from utils.fact_tracker import FactTracker
+
+load_dotenv()
 
 # Define bot intents 
 intents = discord.Intents.default()
