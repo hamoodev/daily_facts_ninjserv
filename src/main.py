@@ -131,7 +131,8 @@ async def before_daily_fact():
 @app_commands.describe()
 async def manual_fact(interaction: discord.Interaction):
     """Manually trigger a fact"""
-    if not interaction.user.guild_permissions.administrator:
+    # only admin or hamood can trigger a fact
+    if not interaction.user.guild_permissions.administrator or interaction.user.id != "279224191671205890":
         await interaction.response.send_message("Only administrators can manually trigger facts!", ephemeral=True)
         return
     
