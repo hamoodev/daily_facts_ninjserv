@@ -139,8 +139,15 @@ async def manual_fact(interaction: discord.Interaction):
         await interaction.response.send_message("Only administrators or Hamood can manually trigger facts!", ephemeral=True)
         return
     
-    await interaction.response.defer()
+    await interaction.response.defer(ephemeral=True)
     
+    # Get the channel
+    channel = bot.get_channel(CHANNEL_ID)
+    if not channel:
+        await interaction.followup.send(f"Channel with ID {CHANNEL_ID} not found!", ephemeral=True)
+        return
+    
+    # Generate and send fact to the channel
     fact = await generate_unique_fact()
     embed = discord.Embed(
         title="🧠 Did You Know",
@@ -149,7 +156,9 @@ async def manual_fact(interaction: discord.Interaction):
         timestamp=datetime.now()
     )
     embed.set_footer(text="Hamood wishes you a great life and healthy life!")
-    await interaction.followup.send(embed=embed)
+    
+    await channel.send(embed=embed)
+    await interaction.followup.send(f"Fact sent to {channel.mention}!", ephemeral=True)
 
 @bot.tree.command(name="stats", description="Show fact bot statistics")
 async def fact_stats(interaction: discord.Interaction):
