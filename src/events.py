@@ -124,8 +124,11 @@ async def load_historical_messages(bot, vector_store):
     print(f"Total messages now in database: {total_in_db}")
 
 
-def setup_events(bot, vector_store, fact_generator, channel_id):
+def setup_events(bot, vector_store, fact_generator, fact_tracker, score_manager, channel_id):
     """Setup all Discord event handlers"""
+    
+    # Import setup_commands here to avoid circular imports
+    from commands import setup_commands
     
     @bot.event
     async def on_ready():
@@ -144,6 +147,13 @@ def setup_events(bot, vector_store, fact_generator, channel_id):
         except Exception as e:
             print(f"Warning: Vector store connection failed: {e}")
             print("Bot will continue with limited functionality")
+        
+        # Setup commands (needs to be async)
+        try:
+            await setup_commands(bot, fact_generator, fact_tracker, vector_store, score_manager, channel_id)
+            print("Commands setup completed successfully!")
+        except Exception as e:
+            print(f"Error setting up commands: {e}")
         
         # Sync slash commands
         try:

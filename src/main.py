@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from utils.fact_tracker import FactTracker  
 from utils.vector_store import VectorStore
+from utils.score_manager import ScoreManager
 from gemini_client import GeminiFactGenerator
 from events import setup_events
 from commands import setup_commands
@@ -73,12 +74,12 @@ def main():
     print("📊 Initializing components...")
     fact_tracker = FactTracker(USED_FACTS_FILE)
     vector_store = VectorStore(None, MONGODB_URI)  # Client will be set up in vector store
+    score_manager = ScoreManager(MONGODB_URI)
     fact_generator = GeminiFactGenerator(GEMINI_API_KEY, fact_tracker, vector_store)
     
     print("🔧 Setting up events and commands...")
     # Setup events and commands
-    daily_fact_task = setup_events(bot, vector_store, fact_generator, CHANNEL_ID)
-    setup_commands(bot, fact_generator, fact_tracker, vector_store, CHANNEL_ID)
+    daily_fact_task = setup_events(bot, vector_store, fact_generator, fact_tracker, score_manager, CHANNEL_ID)
     
     print("🚀 Starting bot...")
     print(f"Bot will send daily facts to channel ID: {CHANNEL_ID}")

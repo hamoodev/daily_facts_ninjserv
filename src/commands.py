@@ -7,7 +7,11 @@ from discord import app_commands
 from datetime import datetime
 import json
 import os
+import asyncio
 from datetime import timedelta
+
+from utils.score_decoder import decode_and_verify, parse_score_data
+from models import ScoreRecord
 
 
 # Rate limiting functions
@@ -85,10 +89,13 @@ def get_remaining_uses(user_id: str, command: str, limit: int = 3) -> int:
     return max(0, limit - rate_limits[user_key][today])
 
 
-def setup_commands(bot, fact_generator, fact_tracker, vector_store, channel_id):
+async def setup_commands(bot, fact_generator, fact_tracker, vector_store, score_manager, channel_id):
     """Setup all slash commands"""
     
     from events import load_historical_messages
+    
+    # Connect score manager
+    await score_manager.connect()
     
     @bot.tree.command(name="fact", description="Generate a random fact about a player or general topic")
     @app_commands.describe(player="Optional: specific player to generate a fact about")
@@ -299,6 +306,224 @@ def setup_commands(bot, fact_generator, fact_tracker, vector_store, channel_id):
             print(f"Error generating personality card: {e}")
             await interaction.followup.send("Sorry, I couldn't generate a personality card for that player right now.", ephemeral=True)
 
+    @bot.tree.command(name="submit_score", description="Submit your AOTTG personal record")
+    @app_commands.describe(score_code="Your encoded score from AOTTG (format: CODE-CHECKSUM)")
+    async def submit_score(interaction: discord.Interaction, score_code: str):
+        """Submit and save AOTTG score to the leaderboard"""
+        await interaction.response.defer()
+        
+        try:
+            # Decode and verify the score code
+            result = decode_and_verify(score_code)
+            
+            if not result["valid"]:
+                error_msg = result.get("error", "Invalid score code")
+                embed = discord.Embed(
+                    title="❌ Invalid Score Code",
+                    description=f"**Error:** {error_msg}\n\n**Format:** Your score code should look like `WYAR-126`",
+                    color=0xe74c3c
+                )
+                embed.add_field(
+                    name="How to get your score code:",
+                    value="1. Finish a game in AOTTG\n2. Copy the score code from the results screen\n3. Use `/submit_score <your_code>`",
+                    inline=False
+                )
+                await interaction.followup.send(embed=embed)
+                return
+            
+            # Parse the score data
+            score_data = parse_score_data(result["decoded"])
+            if not score_data["valid"]:
+                embed = discord.Embed(
+                    title="❌ Invalid Score Data",
+                    description=f"**Error:** {score_data['error']}",
+                    color=0xe74c3c
+                )
+                await interaction.followup.send(embed=embed)
+                return
+            
+            # Create score record
+            score_record = ScoreRecord.create(
+                user_id=str(interaction.user.id),
+                username=interaction.user.display_name,
+                kills=score_data["kills"],
+                deaths=score_data["deaths"],
+                guild_id=str(interaction.guild.id)
+            )
+            
+            # Save to database
+            success = await score_manager.save_score(score_record)
+            if not success:
+                embed = discord.Embed(
+                    title="❌ Database Error",
+                    description="Failed to save your score. Please try again later.",
+                    color=0xe74c3c
+                )
+                await interaction.followup.send(embed=embed)
+                return
+            
+            # Get user's rank
+            rank = await score_manager.get_user_rank(str(interaction.user.id), str(interaction.guild.id))
+            total_players = await score_manager.get_total_players(str(interaction.guild.id))
+            
+            # Create success embed
+            embed = discord.Embed(
+                title="✅ Score Submitted Successfully!",
+                color=0x2ecc71,
+                timestamp=datetime.now()
+            )
+            
+            embed.add_field(
+                name="📊 Your Stats",
+                value=f"**Kills:** {score_record.kills}\n**Deaths:** {score_record.deaths}\n**K/D Ratio:** {score_record.kd_ratio:.2f}",
+                inline=True
+            )
+            
+            if rank:
+                embed.add_field(
+                    name="🏆 Leaderboard Position",
+                    value=f"**Rank:** #{rank} out of {total_players}",
+                    inline=True
+                )
+            
+            embed.add_field(
+                name="🎮 AOTTG Stats",
+                value="Use `/leaderboard` to see where you rank!",
+                inline=False
+            )
+            
+            embed.set_footer(text=f"Submitted by {interaction.user.display_name}")
+            
+            await interaction.followup.send(embed=embed)
+            
+        except Exception as e:
+            print(f"Error in submit_score: {e}")
+            embed = discord.Embed(
+                title="❌ Unexpected Error",
+                description="Something went wrong while processing your score. Please try again later.",
+                color=0xe74c3c
+            )
+            await interaction.followup.send(embed=embed)
+
+    @bot.tree.command(name="leaderboard", description="Show AOTTG leaderboard with top players")
+    @app_commands.describe(limit="Number of top players to show (1-20, default: 10)")
+    async def leaderboard(interaction: discord.Interaction, limit: int = 10):
+        """Display AOTTG leaderboard sorted by K/D ratio"""
+        # Validate limit
+        if limit < 1 or limit > 20:
+            await interaction.response.send_message(
+                "❌ Limit must be between 1 and 20!",
+                ephemeral=True
+            )
+            return
+            
+        # Defer immediately to prevent timeout
+        await interaction.response.defer()
+        
+        try:
+            # Check if score manager is connected
+            if score_manager.collection is None:
+                embed = discord.Embed(
+                    title="❌ Database Error",
+                    description="Score database is not connected. Please try again later.",
+                    color=0xe74c3c
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+            
+            # Get leaderboard data with timeout protection
+            async def get_leaderboard_data():
+                leaderboard = await score_manager.get_leaderboard(str(interaction.guild.id), limit)
+                total_players = await score_manager.get_total_players(str(interaction.guild.id))
+                return leaderboard, total_players
+            
+            # Use timeout to prevent hanging
+            leaderboard, total_players = await asyncio.wait_for(get_leaderboard_data(), timeout=10.0)
+            
+            if not leaderboard:
+                embed = discord.Embed(
+                    title="📊 AOTTG Leaderboard",
+                    description="No scores submitted yet! Be the first to use `/submit_score`!",
+                    color=0x95a5a6
+                )
+                await interaction.followup.send(embed=embed)
+                return
+            
+            # Create leaderboard embed
+            embed = discord.Embed(
+                title="🏆 AOTTG Leaderboard",
+                description=f"Top {len(leaderboard)} players out of {total_players} total",
+                color=0xf1c40f,
+                timestamp=datetime.now()
+            )
+            
+            leaderboard_text = ""
+            medals = ["🥇", "🥈", "🥉"]
+            
+            for i, score in enumerate(leaderboard, 1):
+                # Get medal or rank number
+                rank_symbol = medals[i-1] if i <= 3 else f"`#{i:2d}`"
+                
+                # Format the entry
+                kd_display = f"{score.kd_ratio:.2f}" if score.deaths > 0 else f"{score.kills}.00"
+                leaderboard_text += f"{rank_symbol} **{score.username}**\n"
+                leaderboard_text += f"     `{score.kills:4d} | {score.deaths:4d} | {kd_display:>6s}`\n\n"
+            
+            embed.add_field(
+                name="Format: Kills | Deaths | Ratio",
+                value=leaderboard_text,
+                inline=False
+            )
+            
+            # Show user's rank if they're not in top list (with timeout)
+            try:
+                user_rank = await asyncio.wait_for(
+                    score_manager.get_user_rank(str(interaction.user.id), str(interaction.guild.id)),
+                    timeout=5.0
+                )
+                if user_rank and user_rank > len(leaderboard):
+                    user_score = await asyncio.wait_for(
+                        score_manager.get_user_score(str(interaction.user.id), str(interaction.guild.id)),
+                        timeout=5.0
+                    )
+                    if user_score:
+                        embed.add_field(
+                            name=f"Your Rank: #{user_rank}",
+                            value=f"`{user_score.kills:4d} | {user_score.deaths:4d} | {user_score.kd_ratio:>6.2f}`",
+                            inline=False
+                        )
+            except asyncio.TimeoutError:
+                print("Timeout getting user rank - skipping")
+                pass
+            
+            embed.set_footer(text="🎮 Submit your scores with /submit_score")
+            
+            await interaction.followup.send(embed=embed)
+            
+        except asyncio.TimeoutError:
+            print("Leaderboard command timed out")
+            embed = discord.Embed(
+                title="⏰ Timeout",
+                description="The request took too long to process. Please try again.",
+                color=0xe67e22
+            )
+            try:
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            except:
+                pass  # If interaction expired, just log and move on
+                
+        except Exception as e:
+            print(f"Error in leaderboard: {e}")
+            embed = discord.Embed(
+                title="❌ Error",
+                description="Failed to load leaderboard. Please try again later.",
+                color=0xe74c3c
+            )
+            try:
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            except:
+                pass  # If interaction expired, just log and move on
+
     # Error handling for slash commands
     @bot.tree.error
     async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -307,16 +532,31 @@ def setup_commands(bot, fact_generator, fact_tracker, vector_store, channel_id):
         try:
             if isinstance(error, app_commands.MissingPermissions):
                 error_msg = "You don't have permission to use this command!"
+            elif isinstance(error, app_commands.CommandOnCooldown):
+                error_msg = f"Command is on cooldown. Try again in {error.retry_after:.2f} seconds."
             else:
                 error_msg = "An error occurred while processing the command."
             
-            # Check if interaction has already been responded to
-            if not interaction.response.is_done():
-                await interaction.response.send_message(error_msg, ephemeral=True)
-            else:
-                # Use followup if response is already done
-                await interaction.followup.send(error_msg, ephemeral=True)
+            # Try to send error message, handling different interaction states
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(error_msg, ephemeral=True)
+                else:
+                    # Use followup if response is already done
+                    await interaction.followup.send(error_msg, ephemeral=True)
+            except discord.NotFound:
+                # Interaction token expired or invalid - just log it
+                print("Could not respond to interaction - token expired or invalid")
+            except discord.HTTPException as http_error:
+                if http_error.code == 40060:  # Interaction already acknowledged
+                    print("Interaction already acknowledged - cannot send error message")
+                else:
+                    print(f"HTTP error sending error message: {http_error}")
+            except Exception as send_error:
+                print(f"Unexpected error sending error message: {send_error}")
                 
         except Exception as e:
             print(f"Error in error handler: {e}")
-            # Last resort - just log the error if we can't send any message 
+            # Last resort - just log the error if we can't send any message
+            
+    
